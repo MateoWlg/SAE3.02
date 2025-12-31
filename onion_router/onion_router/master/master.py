@@ -1,12 +1,14 @@
 import socket
 import threading
 import sys
-sys.path.append('.') # Permet d'importer config et core
-from config import MASTER_IP, MASTER_PORT, BUFFER_SIZE, SEPARATOR
-from core.crypto_simple import N_MODULE
+sys.path.append('.')
+sys.path.append('..')
 
-# Stockage des routeurs : { "Nom": {ip, port, pub_key} }
-registry = {}
+from config import MASTER_IP, MASTER_PORT, BUFFER_SIZE, SEPARATOR
+from core.db_manager import save_node_to_db, load_nodes_from_db
+
+# On charge la sauvegarde au démarrage
+registry = load_nodes_from_db()
 
 def handle_node(conn, addr):
     try:
@@ -18,13 +20,16 @@ def handle_node(conn, addr):
 
         if command == 'REGISTER':
             # Format: REGISTER::::Nom::::IP::::Port::::Key
-            name, ip, port, pub_key = parts[1], parts[2], parts[3], parts[4]
-            registry[name] = {'ip': ip, 'port': int(port), 'key': pub_key}
+            name, ip, port, key = parts[1], parts[2], parts[3], parts[4]
+            registry[name] = {'ip': ip, 'port': int(port), 'key': key}
+            
+            # Sauvegarde disque
+            save_node_to_db(name, ip, port, key)
+            
             print(f"[+] Routeur enregistré : {name} ({ip}:{port})")
             conn.send("OK".encode())
 
         elif command == 'GET_NODES':
-            # Le client demande la liste des routeurs
             nodes_list = []
             for name, info in registry.items():
                 nodes_list.append(f"{name},{info['ip']},{info['port']},{info['key']}")
@@ -32,7 +37,7 @@ def handle_node(conn, addr):
             conn.send(response.encode())
 
     except Exception as e:
-        print(f"[!] Erreur : {e}")
+        print(f"[!] Erreur Master : {e}")
     finally:
         conn.close()
 
@@ -41,6 +46,7 @@ def start_master():
     server.bind((MASTER_IP, MASTER_PORT))
     server.listen(5)
     print(f"[*] MASTER (Annuaire) démarré sur {MASTER_IP}:{MASTER_PORT}")
+    print(f"[*] {len(registry)} routeurs chargés depuis la sauvegarde.")
     
     while True:
         conn, addr = server.accept()
