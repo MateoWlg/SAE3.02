@@ -1,63 +1,106 @@
 import socket
-import json
-import random
 import sys
-import threading
+import random
 
-# Importation des configurations et des modules
-sys.path.append('.') 
-sys.path.append('core')
-from config import MASTER_IP, MASTER_PORT, CLIENT_A_IP, CLIENT_A_PORT, CLIENT_B_IP, CLIENT_B_PORT
-from crypto_simple import encrypt_data, text_to_int, int_to_text
+sys.path.append('.')
+sys.path.append('..')
 
-class OnionClient:
+from config import MASTER_IP, MASTER_PORT, SEPARATOR, BUFFER_SIZE
+from core.crypto_simple import encrypt_data
+
+def get_nodes():
+    """Récupère la liste des nœuds depuis le Master"""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.connect((MASTER_IP, MASTER_PORT))
+    s.send(f"GET_NODES{SEPARATOR}Client".encode())
+    data = s.recv(BUFFER_SIZE).decode()
+    s.close()
     
-    # ... (Le code des méthodes OnionClient.get_router_info, build_onion, 
-    # send_message, handle_incoming_message, et start_listener est le même que précédemment)
-    
-    def __init__(self, name, listen_ip, listen_port): # NOUVEAU: Ajout de listen_ip
-        self.name = name
-        self.ip = listen_ip
-        self.port = listen_port
-        self.router_data = [] 
-        print(f"Client {self.name} démarré. Écoute sur {self.ip}:{self.port} pour le message final.")
-        
-    def get_router_info(self):
-        # Utilise MASTER_IP et MASTER_PORT du fichier config
-        pass
+    nodes = []
+    if data:
+        raw_nodes = data.split('|')
+        for n in raw_nodes:
+            # Format: nom,ip,port,key
+            parts = n.split(',')
+            nodes.append({'name': parts[0], 'ip': parts[1], 'port': int(parts[2]), 'key': int(parts[3])})
+    return nodes
 
-    # ... (autres méthodes inchangées)
+def create_onion(message, circuit, recipient_ip, recipient_port):
+    """Encapsule le message dans 3 couches (Oignon)"""
+    # 3. Couche INTÉRIEURE (Pour le dernier nœud -> vers Client B)
+    # Le dernier nœud doit voir : IP_B|Port_B|Message_Clair
+    payload = f"{recipient_ip}|{recipient_port}|{message}"
+    # On chiffre avec la clé du nœud de sortie (le dernier du circuit)
+    encrypted_layer3 = encrypt_data(payload, circuit[2]['key'])
+    
+    # 2. Couche MILIEU (Pour le 2ème nœud -> vers le 3ème)
+    # Le 2ème nœud doit voir : IP_Node3|Port_Node3|Layer3
+    payload_2 = f"{circuit[2]['ip']}|{circuit[2]['port']}|{encrypted_layer3}"
+    encrypted_layer2 = encrypt_data(payload_2, circuit[1]['key'])
+    
+    # 1. Couche EXTÉRIEURE (Pour le 1er nœud -> vers le 2ème)
+    # Le 1er nœud doit voir : IP_Node2|Port_Node2|Layer2
+    payload_1 = f"{circuit[1]['ip']}|{circuit[1]['port']}|{encrypted_layer2}"
+    encrypted_layer1 = encrypt_data(payload_1, circuit[0]['key'])
+    
+    return encrypted_layer1
+
+def start_sender():
+    print("[*] Téléchargement de l'annuaire...")
+    nodes = get_nodes()
+    if len(nodes) < 3:
+        print(f"[!] Pas assez de nœuds actifs ({len(nodes)}/3 min). Lancez les routeurs !")
+        return
+
+    # Sélectionner 3 nœuds au hasard
+    circuit = random.sample(nodes, 3)
+    print(f"[+] Circuit choisi : {circuit[0]['name']} -> {circuit[1]['name']} -> {circuit[2]['name']}")
+
+    message = "Coucou je suis ClientA"
+    # Destination finale (Client B sur VM 3)
+    dest_ip = '192.168.1.12' 
+    dest_port = 9000
+
+    print("[*] Construction de l'oignon...")
+    onion = create_onion(message, circuit, dest_ip, dest_port)
+    
+    # Envoyer au premier nœud
+    entry_node = circuit[0]
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect((entry_node['ip'], entry_node['port']))
+        msg = f"ONION{SEPARATOR}{onion}"
+        s.send(msg.encode())
+        s.close()
+        print("[*] Oignon envoyé !")
+    except Exception as e:
+        print(f"[!] Erreur envoi : {e}")
+
+def start_receiver():
+    # Le Client B écoute sur le port 9000 (comme défini dans create_onion)
+    ip = '192.168.1.12' # IP de la VM 3
+    port = 9000
+    
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind((ip, port))
+    s.listen(5)
+    print(f"[*] Client B en attente sur {ip}:{port}...")
+    
+    while True:
+        conn, addr = s.accept()
+        data = conn.recv(BUFFER_SIZE).decode()
+        # Le dernier routeur envoie souvent avec le préfixe ONION, ou brut.
+        # On nettoie si besoin.
+        if "ONION" in data:
+            data = data.split(SEPARATOR)[1]
+            
+        print(f"\n★ REÇU : {data}\n")
+        conn.close()
 
 if __name__ == '__main__':
-    # Le Master et les Routeurs doivent être démarrés en premier.
-    # Ex: R1(8001) sur VM2, R2(8002) sur VM2, R3(8003) sur VM3
-
-    try:
-        client_name = sys.argv[1]
-    except IndexError:
-        print("Usage: python client.py <nom_client> (ex: ClientA ou ClientB)")
-        sys.exit(1)
-
-    if client_name == "ClientA":
-        client_a = OnionClient("Client A", CLIENT_A_IP, CLIENT_A_PORT)
-        
-        # Démarrage de l'écoute
-        listener_thread = threading.Thread(target=client_a.start_listener)
-        listener_thread.daemon = True
-        listener_thread.start()
-
-        time.sleep(2) 
-        
-        if client_a.get_router_info():
-            # Destinataire: Client B (qui doit être démarré sur son propre terminal)
-            client_b_addr = f"{CLIENT_B_IP}:{CLIENT_B_PORT}"
-            message = f"Bonjour Client B, de la part de {client_name}. (Test à {time.strftime('%H:%M:%S')})"
-            client_a.send_message("Client B", client_b_addr, message)
-
-    elif client_name == "ClientB":
-        # Client B s'initialise et écoute simplement
-        client_b = OnionClient("Client B", CLIENT_B_IP, CLIENT_B_PORT)
-        client_b.start_listener()
-        
-    else:
-        print("Nom de client inconnu. Utilisez ClientA ou ClientB.")
+    if len(sys.argv) < 2:
+        print("Usage: python3 client.py [ClientA|ClientB]")
+    elif sys.argv[1] == 'ClientA':
+        start_sender()
+    elif sys.argv[1] == 'ClientB':
+        start_receiver()
