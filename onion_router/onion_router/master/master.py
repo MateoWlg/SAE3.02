@@ -1,63 +1,50 @@
 import socket
 import threading
-import json
-import time
 import sys
+sys.path.append('.') # Permet d'importer config et core
+from config import MASTER_IP, MASTER_PORT, BUFFER_SIZE, SEPARATOR
+from core.crypto_simple import N_MODULE
 
-# Importation des configurations et des modules
-sys.path.append('.') # Permet d'importer config.py
-sys.path.append('core')
-from config import MASTER_IP, MASTER_PORT, DB_CONFIG
-from db_manager import DBManager
-from crypto_simple import N_MODULE
+# Stockage des routeurs : { "Nom": {ip, port, pub_key} }
+registry = {}
 
-# (Le reste du code de la classe MasterServer et de ses méthodes handle_connection, 
-# register_router_info, et send_router_keys est identique à la proposition précédente)
-
-class MasterServer:
-    # ... (le code des méthodes MasterServer.__init__, handle_connection, 
-    # register_router_info, send_router_keys, et start est le même que précédemment)
-    
-    def __init__(self):
-        self.db = DBManager(**DB_CONFIG)
-        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server_socket.bind((MASTER_IP, MASTER_PORT))
-        self.server_socket.listen(5)
-        print(f"Master démarré. Écoute sur {MASTER_IP}:{MASTER_PORT}...")
-        self.db.connect()
+def handle_node(conn, addr):
+    try:
+        data = conn.recv(BUFFER_SIZE).decode().strip()
+        if not data: return
         
-    def handle_connection(self, conn, addr):
-        # ... (code inchangé)
-        pass
+        parts = data.split(SEPARATOR)
+        command = parts[0]
 
-    def register_router_info(self, conn, message):
-        # ... (code inchangé)
-        pass
+        if command == 'REGISTER':
+            # Format: REGISTER::::Nom::::IP::::Port::::Key
+            name, ip, port, pub_key = parts[1], parts[2], parts[3], parts[4]
+            registry[name] = {'ip': ip, 'port': int(port), 'key': pub_key}
+            print(f"[+] Routeur enregistré : {name} ({ip}:{port})")
+            conn.send("OK".encode())
 
-    def send_router_keys(self, conn):
-        # ... (code inchangé)
-        pass
+        elif command == 'GET_NODES':
+            # Le client demande la liste des routeurs
+            nodes_list = []
+            for name, info in registry.items():
+                nodes_list.append(f"{name},{info['ip']},{info['port']},{info['key']}")
+            response = "|".join(nodes_list)
+            conn.send(response.encode())
 
-    def start(self):
-        # ... (code inchangé)
-        pass
+    except Exception as e:
+        print(f"[!] Erreur : {e}")
+    finally:
+        conn.close()
+
+def start_master():
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind((MASTER_IP, MASTER_PORT))
+    server.listen(5)
+    print(f"[*] MASTER (Annuaire) démarré sur {MASTER_IP}:{MASTER_PORT}")
+    
+    while True:
+        conn, addr = server.accept()
+        threading.Thread(target=handle_node, args=(conn, addr)).start()
 
 if __name__ == '__main__':
-    # Initialisation de la BDD et création de la table 
-    db_init = DBManager(**DB_CONFIG)
-    db_init.connect()
-    # (Exécution du script CREATE TABLE pour s'assurer qu'elle existe)
-    db_init.execute_query("""
-    CREATE TABLE IF NOT EXISTS Routeurs (
-        RouterID INT PRIMARY KEY AUTO_INCREMENT,
-        Nom VARCHAR(50) NOT NULL UNIQUE,
-        Adresse_IP VARCHAR(15) NOT NULL,
-        Port INT NOT NULL,
-        Cle_Publique INT NOT NULL, 
-        Cle_Privee INT NOT NULL 
-    );
-    """)
-    db_init.close()
-    
-    server = MasterServer()
-    server.start()
+    start_master()
